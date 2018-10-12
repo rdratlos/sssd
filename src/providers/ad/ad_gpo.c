@@ -1096,13 +1096,14 @@ ad_gpo_filter_gpos(TALLOC_CTX *mem_ctx,
                    int *_num_filtered_gpos)
 {
     TALLOC_CTX *tmp_ctx = NULL;
-    int i = 0;
+    int i, j = 0;
     int ret = 0;
     struct gp_gpo *candidate_gpo = NULL;
     struct security_descriptor *sd = NULL;
     struct security_acl *dacl = NULL;
     int gpo_dn_idx = 0;
     bool access_allowed = false;
+    bool duplicate_gpo;
     struct gp_gpo **filtered_gpos = NULL;
 
     tmp_ctx = talloc_new(NULL);
@@ -1123,6 +1124,7 @@ ad_gpo_filter_gpos(TALLOC_CTX *mem_ctx,
     for (i = 0; i < num_candidate_gpos; i++) {
 
         access_allowed = false;
+        duplicate_gpo = false;
         candidate_gpo = candidate_gpos[i];
 
         /* Not all candidate GPOs in the list may have been returned due to
@@ -1136,7 +1138,28 @@ ad_gpo_filter_gpos(TALLOC_CTX *mem_ctx,
         DEBUG(SSSDBG_TRACE_FUNC, "examining candidate_gpo_guid:%s\n",
               candidate_gpo->gpo_guid);
 
-        /* gpo_func_version must be set to version 2 */
+        /* One and the same GPO may be associated to different SOMs */
+        for (j = 0; j < i; j++) {
+            if (candidate_gpos[j]->gpo_guid == NULL) {
+                continue;
+            }
+            if (sss_string_equal(domain->case_sensitive,
+                                 candidate_gpos[j]->gpo_dn,
+                                 candidate_gpo->gpo_dn)) {
+                duplicate_gpo = true;
+                break;
+            }
+        }
+        if (duplicate_gpo) {
+            DEBUG(SSSDBG_TRACE_FUNC,
+                  "duplicate candidate_gpo_guid skipped: GPO already processed\n");
+            continue;
+        }
+
+        /*
+         * [MS-GPOL] 3.2.5.1.6:
+         * gpo_func_version must be set to version 2
+         */
         if (candidate_gpo->gpo_func_version != 2) {
             DEBUG(SSSDBG_TRACE_FUNC,
                   "GPO denied per filtering: "
@@ -5101,6 +5124,7 @@ ad_gpo_sd_process_attrs(struct tevent_req *req,
     int ret;
     struct ldb_message_element *el = NULL;
     const char *gpo_guid = NULL;
+    const char *gpo_dn = NULL;
     const char *raw_file_sys_path = NULL;
     char *file_sys_path = NULL;
     uint8_t *raw_extension_names = NULL;
@@ -5128,6 +5152,23 @@ ad_gpo_sd_process_attrs(struct tevent_req *req,
 
     DEBUG(SSSDBG_TRACE_ALL, "populating attrs for gpo_guid: %s\n",
           gp_gpo->gpo_guid);
+
+    /* retrieve original AD_AT_DN */
+    ret = sysdb_attrs_get_string(result, AD_AT_DN, &gpo_dn);
+    if (ret != EOK) {
+        DEBUG(SSSDBG_OP_FAILURE,
+              "sysdb_attrs_get_string failed: [%d](%s)\n",
+              ret, sss_strerror(ret));
+        goto done;
+    }
+    talloc_free(discard_const(gp_gpo->gpo_dn));
+    gp_gpo->gpo_dn = talloc_steal(gp_gpo, gpo_dn);
+    if (gp_gpo->gpo_dn == NULL) {
+        ret = ENOMEM;
+        goto done;
+    }
+    DEBUG(SSSDBG_TRACE_ALL, "original gpo_dn: %s\n",
+          gp_gpo->gpo_dn);
 
     /* retrieve AD_AT_FILE_SYS_PATH */
     ret = sysdb_attrs_get_string(result,
