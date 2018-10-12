@@ -7180,30 +7180,32 @@ START_TEST(test_gpo_store_retrieve)
     const char *guid;
     int version;
     static const char *test_guid = "3610EDA5-77EF-11D2-8DC5-00C04FA31A66";
+    const char *attrs[] = SYSDB_GPO_ATTRS;
 
     ret = setup_sysdb_tests(&test_ctx);
     fail_if(ret != EOK, "Could not set up the test");
 
     ret = sysdb_gpo_get_gpo_by_guid(test_ctx, test_ctx->domain,
                                     test_guid,
+                                    attrs,
                                     &result);
     fail_if(ret != ENOENT, "GPO present in cache before store op");
 
-    ret = sysdb_gpo_get_gpos(test_ctx, test_ctx->domain, &result);
+    ret = sysdb_gpo_get_gpos(test_ctx, test_ctx->domain, attrs, &result);
     fail_if(ret != ENOENT, "GPO present in cache before store op");
 
     ret = sysdb_gpo_store_gpo(test_ctx->domain,
-                              test_guid, 1, 5, 0);
+                              test_guid, 1, 1, 5, 0);
     fail_if(ret != EOK, "Could not store a test GPO");
 
-    ret = sysdb_gpo_get_gpos(test_ctx, test_ctx->domain, &result);
+    ret = sysdb_gpo_get_gpos(test_ctx, test_ctx->domain, attrs, &result);
     fail_if(ret != EOK, "GPOs not in cache after store op");
     fail_if(result == NULL, "Could not get GPOs");
     ck_assert_int_eq(result->count, 1);
 
     result = NULL;
     ret = sysdb_gpo_get_gpo_by_guid(test_ctx, test_ctx->domain,
-                                    test_guid, &result);
+                                    test_guid, attrs, &result);
     fail_if(ret != EOK, "GPO not in cache after store op");
     fail_if(result == NULL, "Could not get GPOs by guid: %s", test_guid);
     ck_assert_int_eq(result->count, 1);
@@ -7213,7 +7215,7 @@ START_TEST(test_gpo_store_retrieve)
     ck_assert_str_eq(guid, test_guid);
 
     version = ldb_msg_find_attr_as_uint(result->msgs[0],
-                                        SYSDB_GPO_VERSION_ATTR, 0);
+                                        SYSDB_GPO_AD_VERSION_ATTR, 0);
     ck_assert_int_eq(version, 1);
     talloc_free(test_ctx);
 }
@@ -7227,31 +7229,32 @@ START_TEST(test_gpo_replace)
     const char *guid;
     int version;
     static const char *test_guid = "3610EDA5-77EF-11D2-8DC5-00C04FA31A66";
+    const char *attrs[] = SYSDB_GPO_ATTRS;
 
     ret = setup_sysdb_tests(&test_ctx);
     fail_if(ret != EOK, "Could not setup the test");
 
     ret = sysdb_gpo_get_gpo_by_guid(test_ctx, test_ctx->domain,
-                                    test_guid, &result);
+                                    test_guid, attrs, &result);
     fail_if(ret != EOK, "GPO not in cache after store op");
     fail_if(result == NULL, "Could not get GPOs by guid: %s", test_guid);
     ck_assert_int_eq(result->count, 1);
 
     guid = ldb_msg_find_attr_as_string(result->msgs[0],
-                                       SYSDB_GPO_GUID_ATTR, NULL);
+                                       SYSDB_GPO_GUID_ATTR, 0);
     ck_assert_str_eq(guid, test_guid);
 
     version = ldb_msg_find_attr_as_uint(result->msgs[0],
-                                        SYSDB_GPO_VERSION_ATTR, 0);
+                                        SYSDB_GPO_AD_VERSION_ATTR, 0);
     ck_assert_int_eq(version, 1);
 
     /* Modify the version */
     ret = sysdb_gpo_store_gpo(test_ctx->domain,
-                              test_guid, 2, 5, 0);
+                              test_guid, 2, 2, 5, 0);
     fail_if(ret != EOK, "Could not store a test GPO");
 
     ret = sysdb_gpo_get_gpo_by_guid(test_ctx, test_ctx->domain,
-                                    test_guid, &result);
+                                    test_guid, attrs, &result);
     fail_if(ret != EOK, "GPO not in cache after modify op");
     fail_if(result == NULL, "Could not get GPOs by guid: %s", test_guid);
     ck_assert_int_eq(result->count, 1);
@@ -7261,7 +7264,7 @@ START_TEST(test_gpo_replace)
     ck_assert_str_eq(guid, test_guid);
 
     version = ldb_msg_find_attr_as_uint(result->msgs[0],
-                                        SYSDB_GPO_VERSION_ATTR, 0);
+                                        SYSDB_GPO_AD_VERSION_ATTR, 0);
     ck_assert_int_eq(version, 2);
     talloc_free(test_ctx);
 }
@@ -7271,6 +7274,7 @@ START_TEST(test_gpo_result)
 {
     errno_t ret;
     struct sysdb_test_ctx *test_ctx;
+    const char *cse_guid = "{827D319E-6EAC-11D2-A4EA-00C04F79F83A}";
     const char *allow_key = "SeRemoteInteractiveLogonRight";
     const char *deny_key = "SeDenyRemoteInteractiveLogonRight";
     const char *value = NULL;
@@ -7279,69 +7283,79 @@ START_TEST(test_gpo_result)
     fail_if(ret != EOK, "Could not setup the test");
 
     /* No result in cache */
-    ret = sysdb_gpo_get_gpo_result_setting(test_ctx, test_ctx->domain,
-                                           allow_key, &value);
+    ret = sysdb_gpo_get_gp_result_setting(test_ctx,
+                                          test_ctx->domain, cse_guid,
+                                          allow_key, &value);
     ck_assert_int_eq(ret, ENOENT);
 
-    ret = sysdb_gpo_get_gpo_result_setting(test_ctx, test_ctx->domain,
-                                           deny_key, &value);
+    ret = sysdb_gpo_get_gp_result_setting(test_ctx,
+                                          test_ctx->domain, cse_guid,
+                                          deny_key, &value);
     ck_assert_int_eq(ret, ENOENT);
 
     /* Delete with no result object is a noop */
-    ret = sysdb_gpo_delete_gpo_result_object(test_ctx, test_ctx->domain);
+    ret = sysdb_gpo_delete_gp_result_object(test_ctx,
+                                            test_ctx->domain, cse_guid);
     ck_assert_int_eq(ret, EOK);
 
     /* Store an allow value, triggering a new result object */
-    ret = sysdb_gpo_store_gpo_result_setting(test_ctx->domain,
-                                             allow_key, "allow_val1");
+    ret = sysdb_gpo_store_gp_result_setting(test_ctx->domain, cse_guid,
+                                            allow_key, "allow_val1");
     ck_assert_int_eq(ret, EOK);
 
     /* Now both searches should succeed, but only allow_key should return
      * a valid value
      */
-    ret = sysdb_gpo_get_gpo_result_setting(test_ctx, test_ctx->domain,
-                                           allow_key, &value);
+    ret = sysdb_gpo_get_gp_result_setting(test_ctx,
+                                          test_ctx->domain, cse_guid,
+                                          allow_key, &value);
     ck_assert_int_eq(ret, EOK);
     ck_assert_str_eq(value, "allow_val1");
 
-    ret = sysdb_gpo_get_gpo_result_setting(test_ctx, test_ctx->domain,
-                                           deny_key, &value);
+    ret = sysdb_gpo_get_gp_result_setting(test_ctx,
+                                          test_ctx->domain, cse_guid,
+                                          deny_key, &value);
     ck_assert_int_eq(ret, EOK);
     fail_unless(value == NULL, "Unexpected value returned for deny key "
                                "from sysdb_gpo_get_gpo_result_setting");
 
     /* Updating replaces the original value */
-    ret = sysdb_gpo_store_gpo_result_setting(test_ctx->domain,
-                                             allow_key, "allow_val2");
+    ret = sysdb_gpo_store_gp_result_setting(test_ctx->domain, cse_guid,
+                                            allow_key, "allow_val2");
     ck_assert_int_eq(ret, EOK);
 
-    ret = sysdb_gpo_get_gpo_result_setting(test_ctx, test_ctx->domain,
-                                           allow_key, &value);
+    ret = sysdb_gpo_get_gp_result_setting(test_ctx,
+                                          test_ctx->domain, cse_guid,
+                                          allow_key, &value);
     ck_assert_int_eq(ret, EOK);
     ck_assert_str_eq(value, "allow_val2");
 
     /* NULL removes the value completely */
-    ret = sysdb_gpo_store_gpo_result_setting(test_ctx->domain,
-                                             allow_key, NULL);
+    ret = sysdb_gpo_store_gp_result_setting(test_ctx->domain, cse_guid,
+                                            allow_key, NULL);
     ck_assert_int_eq(ret, EOK);
 
-    ret = sysdb_gpo_get_gpo_result_setting(test_ctx, test_ctx->domain,
-                                           allow_key, &value);
+    ret = sysdb_gpo_get_gp_result_setting(test_ctx,
+                                          test_ctx->domain, cse_guid,
+                                          allow_key, &value);
     ck_assert_int_eq(ret, EOK);
     fail_unless(value == NULL, "Unexpected value returned for allow key"
                                "from sysdb_gpo_get_gpo_result_setting" );
 
     /* Delete the result */
-    ret = sysdb_gpo_delete_gpo_result_object(test_ctx, test_ctx->domain);
+    ret = sysdb_gpo_delete_gp_result_object(test_ctx,
+                                            test_ctx->domain, cse_guid);
     ck_assert_int_eq(ret, EOK);
 
     /* No result in cache */
-    ret = sysdb_gpo_get_gpo_result_setting(test_ctx, test_ctx->domain,
-                                           allow_key, &value);
+    ret = sysdb_gpo_get_gp_result_setting(test_ctx,
+                                          test_ctx->domain, cse_guid,
+                                          allow_key, &value);
     ck_assert_int_eq(ret, ENOENT);
 
-    ret = sysdb_gpo_get_gpo_result_setting(test_ctx, test_ctx->domain,
-                                           deny_key, &value);
+    ret = sysdb_gpo_get_gp_result_setting(test_ctx,
+                                          test_ctx->domain, cse_guid,
+                                          deny_key, &value);
     ck_assert_int_eq(ret, ENOENT);
 }
 END_TEST
