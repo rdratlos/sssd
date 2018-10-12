@@ -325,7 +325,7 @@ void test_ad_gpo_ace_includes_target_sid_false(void **state)
     const char *group_sids[] = {"S-1-5-21-2-3-5",
                                 "S-1-5-21-2-3-6"};
 
-    test_ad_gpo_ace_includes_target_sid(target_sid, group_sids, group_size, 
+    test_ad_gpo_ace_includes_target_sid(target_sid, group_sids, group_size,
                                         ace_dom_sid, false);
 }
 
