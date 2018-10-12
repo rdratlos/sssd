@@ -7179,6 +7179,7 @@ START_TEST(test_gpo_store_retrieve)
     struct ldb_result *result = NULL;
     const char *guid;
     int version;
+    int timeout;
     static const char *test_guid = "3610EDA5-77EF-11D2-8DC5-00C04FA31A66";
     const char *attrs[] = SYSDB_GPO_ATTRS;
 
@@ -7195,7 +7196,7 @@ START_TEST(test_gpo_store_retrieve)
     fail_if(ret != ENOENT, "GPO present in cache before store op");
 
     ret = sysdb_gpo_store_gpo(test_ctx->domain,
-                              test_guid, 1, 1, 5, 0);
+                              test_guid, 1, 1, 0, 0);
     fail_if(ret != EOK, "Could not store a test GPO");
 
     ret = sysdb_gpo_get_gpos(test_ctx, test_ctx->domain, attrs, &result);
@@ -7217,6 +7218,15 @@ START_TEST(test_gpo_store_retrieve)
     version = ldb_msg_find_attr_as_uint(result->msgs[0],
                                         SYSDB_GPO_AD_VERSION_ATTR, 0);
     ck_assert_int_eq(version, 1);
+
+    version = ldb_msg_find_attr_as_uint(result->msgs[0],
+                                        SYSDB_GPO_SYSVOL_VERSION_ATTR, 0);
+    ck_assert_int_eq(version, 1);
+
+    timeout = ldb_msg_find_attr_as_uint64(result->msgs[0],
+                                          SYSDB_GPO_TIMEOUT_ATTR, 0);
+    ck_assert_int_eq(timeout, 0);
+
     talloc_free(test_ctx);
 }
 END_TEST
@@ -7248,9 +7258,13 @@ START_TEST(test_gpo_replace)
                                         SYSDB_GPO_AD_VERSION_ATTR, 0);
     ck_assert_int_eq(version, 1);
 
+    version = ldb_msg_find_attr_as_uint(result->msgs[0],
+                                        SYSDB_GPO_SYSVOL_VERSION_ATTR, 0);
+    ck_assert_int_eq(version, 1);
+
     /* Modify the version */
     ret = sysdb_gpo_store_gpo(test_ctx->domain,
-                              test_guid, 2, 2, 5, 0);
+                              test_guid, 2, 3, 5, 0);
     fail_if(ret != EOK, "Could not store a test GPO");
 
     ret = sysdb_gpo_get_gpo_by_guid(test_ctx, test_ctx->domain,
@@ -7266,6 +7280,10 @@ START_TEST(test_gpo_replace)
     version = ldb_msg_find_attr_as_uint(result->msgs[0],
                                         SYSDB_GPO_AD_VERSION_ATTR, 0);
     ck_assert_int_eq(version, 2);
+
+    version = ldb_msg_find_attr_as_uint(result->msgs[0],
+                                        SYSDB_GPO_SYSVOL_VERSION_ATTR, 0);
+    ck_assert_int_eq(version, 3);
     talloc_free(test_ctx);
 }
 END_TEST
