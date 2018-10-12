@@ -3055,10 +3055,6 @@ ad_gpo_access_core_protocol_done(struct tevent_req *subreq)
     talloc_zfree(subreq);
 
     if (ret != EOK) {
-        DEBUG(SSSDBG_TRACE_FUNC,
-              "GPO core protocol engine terminated [%d](%s)\n",
-              ret, sss_strerror(ret));
-
         if (ret == ERR_OFFLINE) {
             DEBUG(SSSDBG_TRACE_FUNC, "Preparing for offline operation.\n");
             ret = process_offline_gpos(state,
@@ -6054,8 +6050,18 @@ ad_gpo_get_gpt_file_done(struct tevent_req *subreq)
     talloc_zfree(subreq);
 
     if (ret != EOK) {
-        DEBUG(SSSDBG_OP_FAILURE, "Unable to retrieve GPT.INI file: [%d](%s}\n",
-              ret, sss_strerror(ret));
+        if (ret == ETIMEDOUT) {
+            /* Allow policy application task to retrieve GPO from
+               GPO cache as group policy server is offline */
+            DEBUG(SSSDBG_MINOR_FAILURE,
+                  "Unable to retrieve GPT.INI file: [%d](%s}\n",
+                  ret, strerror(ret));
+            ret = ERR_OFFLINE;
+        } else {
+            DEBUG(SSSDBG_OP_FAILURE,
+                  "Unable to retrieve GPT.INI file: [%d](%s}\n",
+                  ret, sss_strerror(ret));
+        }
         goto done;
     }
 
@@ -6402,7 +6408,11 @@ static void gpo_cache_file_done(struct tevent_req *subreq)
               ret, sss_strerror(ret));
         tevent_req_error(req, ret);
         return;
-    } else if (state->child_result != 0){
+    } else if (state->child_result == ETIMEDOUT) {
+        /* Group policy file server is offline */
+        tevent_req_error(req, state->child_result);
+        return;
+    } else if (state->child_result != EOK) {
         DEBUG(SSSDBG_CRIT_FAILURE,
               "Error in gpo_child: [%d][%s]\n",
               state->child_result, strerror(state->child_result));
