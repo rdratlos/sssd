@@ -1058,6 +1058,14 @@ ad_gpo_filter_gpos_by_dacl(TALLOC_CTX *mem_ctx,
         access_allowed = false;
         candidate_gpo = candidate_gpos[i];
 
+        /* Not all candidate GPOs in the list may have been returned due to
+         * access control or replication issues. If the GPO was not returned
+         * in the LDAP search response, the GPO GUID is NULL and the GPO must
+         * be ignored. */
+        if (candidate_gpo->gpo_guid == NULL) {
+            continue;
+        }
+
         DEBUG(SSSDBG_TRACE_FUNC, "examining dacl candidate_gpo_guid:%s\n",
               candidate_gpo->gpo_guid);
 
@@ -4401,7 +4409,6 @@ ad_gpo_sd_process_attrs(struct tevent_req *req,
          */
         DEBUG(SSSDBG_TRACE_ALL,
               "machine_ext_names attribute not found or has no value\n");
-        state->gpo_index++;
     } else {
         raw_machine_ext_names = el[0].values[0].data;
 
@@ -4415,9 +4422,9 @@ ad_gpo_sd_process_attrs(struct tevent_req *req,
             goto done;
         }
 
-        state->gpo_index++;
     }
 
+    state->gpo_index++;
     ret = ad_gpo_get_gpo_attrs_step(req);
 
  done:
