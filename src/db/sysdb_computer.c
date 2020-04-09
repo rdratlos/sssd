@@ -28,15 +28,16 @@
 #include "db/sysdb_computer.h"
 
 static errno_t
-sysdb_search_computer(TALLOC_CTX *mem_ctx,
-                      struct sss_domain_info *domain,
-                      const char *filter,
-                      const char **attrs,
-                      size_t *_num_hosts,
-                      struct ldb_message ***_hosts)
+sysdb_search_computer_by_name(TALLOC_CTX *mem_ctx,
+                              struct sss_domain_info *domain,
+                              const char *name,
+                              const char **attrs,
+                              size_t *_num_hosts,
+                              struct ldb_message ***_hosts)
 {
     errno_t ret;
     TALLOC_CTX *tmp_ctx;
+    const char *filter;
     struct ldb_message **results;
     size_t num_results;
 
@@ -45,18 +46,25 @@ sysdb_search_computer(TALLOC_CTX *mem_ctx,
         return ENOMEM;
     }
 
+    filter = talloc_asprintf(tmp_ctx, SYSDB_COMP_FILTER, name);
+    if (!filter) {
+        ret = ENOMEM;
+        goto done;
+    }
+
     ret = sysdb_search_custom(tmp_ctx, domain, filter,
                               COMPUTERS_SUBDIR, attrs,
                               &num_results, &results);
-    if (ret != EOK && ret != ENOENT) {
-        DEBUG(SSSDBG_CRIT_FAILURE,
-              "Error looking up host [%d]: %s\n",
-               ret, strerror(ret));
-        goto done;
-    } else if (ret == ENOENT) {
-        DEBUG(SSSDBG_TRACE_FUNC, "No such host\n");
-        *_hosts = NULL;
-        *_num_hosts = 0;
+    if (ret != EOK) {
+        if (ret == ENOENT) {
+            DEBUG(SSSDBG_TRACE_FUNC, "No such host\n");
+            *_hosts = NULL;
+            *_num_hosts = 0;
+        } else {
+            DEBUG(SSSDBG_CRIT_FAILURE,
+                  "Error looking up host [%d]: %s\n",
+                   ret, strerror(ret));
+        }
         goto done;
     }
 
@@ -79,7 +87,6 @@ sysdb_get_computer(TALLOC_CTX *mem_ctx,
 {
     TALLOC_CTX *tmp_ctx;
     errno_t ret;
-    const char *filter;
     struct ldb_message **hosts;
     size_t num_hosts;
 
@@ -88,14 +95,9 @@ sysdb_get_computer(TALLOC_CTX *mem_ctx,
         return ENOMEM;
     }
 
-    filter = talloc_asprintf(tmp_ctx, SYSDB_COMP_FILTER, computer_name);
-    if (!filter) {
-        ret = ENOMEM;
-        goto done;
-    }
-
-    ret = sysdb_search_computer(tmp_ctx, domain, filter, attrs,
-                                &num_hosts, &hosts);
+    ret = sysdb_search_computer_by_name(tmp_ctx, domain,
+                                        computer_name, attrs,
+                                        &num_hosts, &hosts);
     if (ret != EOK) {
         goto done;
     }
@@ -120,12 +122,16 @@ int
 sysdb_set_computer(TALLOC_CTX *mem_ctx,
                    struct sss_domain_info *domain,
                    const char *computer_name,
-                   const char *sid_str,
+                   const char *dn,
+                   const char *sid,
+                   const char **group_sids,
+                   int num_groups,
                    int cache_timeout,
                    time_t now)
 {
     TALLOC_CTX *tmp_ctx;
     int ret;
+    int i;
     struct sysdb_attrs *attrs;
 
     tmp_ctx = talloc_new(NULL);
@@ -139,8 +145,18 @@ sysdb_set_computer(TALLOC_CTX *mem_ctx,
         goto done;
     }
 
-    ret = sysdb_attrs_add_string(attrs, SYSDB_SID_STR, sid_str);
+    ret = sysdb_attrs_add_string(attrs, SYSDB_ORIG_DN, dn);
     if (ret) goto done;
+
+    ret = sysdb_attrs_add_string(attrs, SYSDB_SID_STR, sid);
+    if (ret) goto done;
+
+    for (i = 0; i < num_groups; i++) {
+        if (group_sids[i] != NULL) {
+            ret = sysdb_attrs_add_string(attrs, SYSDB_MEMBEROF_SID_STR, group_sids[i]);
+            if (ret) goto done;
+        }
+    }
 
     ret = sysdb_attrs_add_string(attrs, SYSDB_OBJECTCLASS, SYSDB_COMPUTER_CLASS);
     if (ret) goto done;
@@ -177,7 +193,7 @@ sysdb_set_computer(TALLOC_CTX *mem_ctx,
      */
 done:
     if (ret) {
-        DEBUG(SSSDBG_TRACE_FUNC, "Error: %d (%s)\n", ret, strerror(ret));
+        DEBUG(SSSDBG_MINOR_FAILURE, "Error: %d (%s)\n", ret, strerror(ret));
     }
     talloc_zfree(tmp_ctx);
 
