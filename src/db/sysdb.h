@@ -1453,7 +1453,7 @@ errno_t sysdb_remove_mapped_data(struct sss_domain_info *domain,
 
 /* === Functions related to GPOs === */
 
-#define SYSDB_GPO_CONTAINER "cn=gpos,cn=ad,cn=custom"
+#define SYSDB_GPO_CONTAINER "cn=gpos,cn=ad,"SYSDB_CUSTOM_CONTAINER
 #define SYSDB_GP_RESULT_CONTAINER "cn=gp_results,"SYSDB_GPO_CONTAINER
 
 /* === Functions related to GPO entries === */
@@ -1472,6 +1472,7 @@ errno_t sysdb_remove_mapped_data(struct sss_domain_info *domain,
 #define SYSDB_GPO_ATTRS { \
         SYSDB_NAME, \
         SYSDB_GPO_GUID_ATTR, \
+        SYSDB_ORIG_DN, \
         SYSDB_GPO_AD_VERSION_ATTR, \
         SYSDB_GPO_SYSVOL_VERSION_ATTR, \
         SYSDB_GPO_TIMEOUT_ATTR, \
@@ -1479,6 +1480,7 @@ errno_t sysdb_remove_mapped_data(struct sss_domain_info *domain,
 
 errno_t sysdb_gpo_store_gpo(struct sss_domain_info *domain,
                             const char *gpo_guid,
+                            const char *gpo_dn,
                             int gpo_ad_version,
                             int gpo_sysvol_version,
                             int cache_timeout,
@@ -1507,7 +1509,6 @@ errno_t sysdb_gpo_get_gpos(TALLOC_CTX *mem_ctx,
 #define SYSDB_TMPL_CSE SYSDB_CSE_GUID_ATTR"=%s,"SYSDB_TMPL_GPO
 
 #define SYSDB_CSE_ATTRS { \
-        SYSDB_NAME, \
         SYSDB_CSE_GUID_ATTR, \
         SYSDB_CSE_VERSION_ATTR, \
         SYSDB_CSE_TIMEOUT_ATTR, \
@@ -1520,6 +1521,14 @@ sysdb_gpo_cse_search(TALLOC_CTX *mem_ctx,
                      const char **attrs,
                      size_t *_num_gpos,
                      struct ldb_message ***_gpos);
+
+errno_t
+sysdb_gpo_cse_search_parent_gpo(TALLOC_CTX *mem_ctx,
+                                struct sss_domain_info *domain,
+                                const char *cse_guid,
+                                const char **attrs,
+                                size_t *_num_gpos,
+                                struct ldb_message ***_gpos);
 
 errno_t sysdb_gpo_store_cse(struct sss_domain_info *domain,
                             const char *gpo_guid,
@@ -1540,6 +1549,10 @@ errno_t sysdb_gpo_get_cses(TALLOC_CTX *mem_ctx,
                            const char *gpo_guid,
                            const char **attrs,
                            struct ldb_result **_result);
+
+errno_t sysdb_gpo_cse_purge(struct sss_domain_info *domain,
+                            const char *cse_guid,
+                            const char *delete_filter);
 
 /* === Functions related to GP Result object === */
 
