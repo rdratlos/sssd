@@ -49,6 +49,7 @@ sysdb_gpo_dn(TALLOC_CTX *mem_ctx, struct sss_domain_info *domain,
 errno_t
 sysdb_gpo_store_gpo(struct sss_domain_info *domain,
                     const char *gpo_guid,
+                    const char *gpo_dn,
                     int gpo_ad_version,
                     int gpo_sysvol_version,
                     int cache_timeout,
@@ -126,6 +127,21 @@ sysdb_gpo_store_gpo(struct sss_domain_info *domain,
         }
 
         lret = ldb_msg_add_string(update_msg, SYSDB_GPO_GUID_ATTR, gpo_guid);
+        if (lret != LDB_SUCCESS) {
+            ret = sss_ldb_error_to_errno(lret);
+            goto done;
+        }
+
+        /* Add the GPO DN */
+        lret = ldb_msg_add_empty(update_msg, SYSDB_ORIG_DN,
+                                 LDB_FLAG_MOD_ADD,
+                                 NULL);
+        if (lret != LDB_SUCCESS) {
+            ret = sss_ldb_error_to_errno(lret);
+            goto done;
+        }
+
+        lret = ldb_msg_add_string(update_msg, SYSDB_ORIG_DN, gpo_dn);
         if (lret != LDB_SUCCESS) {
             ret = sss_ldb_error_to_errno(lret);
             goto done;
@@ -416,6 +432,58 @@ sysdb_gpo_cse_dn(TALLOC_CTX *mem_ctx, struct sss_domain_info *domain,
 }
 
 errno_t
+sysdb_gpo_cse_search(TALLOC_CTX *mem_ctx, struct sss_domain_info *domain,
+                     const char *cse_guid, const char **attrs,
+                     size_t *_num_gpos,
+                     struct ldb_message ***_gpos)
+{
+    errno_t ret;
+    TALLOC_CTX *tmp_ctx;
+    struct ldb_dn *basedn;
+    const char * filter;
+    struct ldb_message **results;
+    size_t num_results;
+
+    tmp_ctx = talloc_new(NULL);
+    if (!tmp_ctx) {
+        return ENOMEM;
+    }
+
+    basedn = sysdb_base_dn(domain->sysdb, tmp_ctx);
+    if (!basedn) {
+        return ENOMEM;
+    }
+    filter = talloc_asprintf(tmp_ctx, SYSDB_CSE_GUID_FILTER, cse_guid);
+    if (!filter) {
+        ret = ENOMEM;
+        goto done;
+    }
+    ret = sysdb_search_entry(tmp_ctx, domain->sysdb, basedn,
+                             LDB_SCOPE_SUBTREE, filter, attrs,
+                             &num_results, &results);
+    if (ret != EOK) {
+        if (ret == ENOENT) {
+            DEBUG(SSSDBG_TRACE_FUNC, "No such CSE %s in cache\n", cse_guid);
+            *_gpos = NULL;
+            *_num_gpos = 0;
+        } else {
+            DEBUG(SSSDBG_CRIT_FAILURE,
+                  "Error looking up CSE %s [%d]: %s\n",
+                  cse_guid, ret, strerror(ret));
+        }
+        goto done;
+    }
+
+    *_gpos = talloc_steal(mem_ctx, results);
+    *_num_gpos = num_results;
+    ret = EOK;
+
+done:
+    talloc_free(tmp_ctx);
+    return ret;
+}
+
+errno_t
 sysdb_gpo_store_cse(struct sss_domain_info *domain,
                     const char *gpo_guid,
                     const char *cse_guid,
@@ -474,14 +542,14 @@ sysdb_gpo_store_cse(struct sss_domain_info *domain,
                                  LDB_FLAG_MOD_ADD,
                                  NULL);
         if (lret != LDB_SUCCESS) {
-            ret = sss_ldb_error_to_errno(lret);
+            ret = sysdb_error_to_errno(lret);
             goto done;
         }
 
         lret = ldb_msg_add_string(update_msg, SYSDB_OBJECTCLASS,
                                   SYSDB_CSE_OC);
         if (lret != LDB_SUCCESS) {
-            ret = sss_ldb_error_to_errno(lret);
+            ret = sysdb_error_to_errno(lret);
             goto done;
         }
 
@@ -490,13 +558,13 @@ sysdb_gpo_store_cse(struct sss_domain_info *domain,
                                  LDB_FLAG_MOD_ADD,
                                  NULL);
         if (lret != LDB_SUCCESS) {
-            ret = sss_ldb_error_to_errno(lret);
+            ret = sysdb_error_to_errno(lret);
             goto done;
         }
 
         lret = ldb_msg_add_string(update_msg, SYSDB_CSE_GUID_ATTR, cse_guid);
         if (lret != LDB_SUCCESS) {
-            ret = sss_ldb_error_to_errno(lret);
+            ret = sysdb_error_to_errno(lret);
             goto done;
         }
 
@@ -505,14 +573,14 @@ sysdb_gpo_store_cse(struct sss_domain_info *domain,
                                  LDB_FLAG_MOD_ADD,
                                  NULL);
         if (lret != LDB_SUCCESS) {
-            ret = sss_ldb_error_to_errno(lret);
+            ret = sysdb_error_to_errno(lret);
             goto done;
         }
 
         lret = ldb_msg_add_fmt(update_msg, SYSDB_CSE_VERSION_ATTR,
                                "%d", cse_version);
         if (lret != LDB_SUCCESS) {
-            ret = sss_ldb_error_to_errno(lret);
+            ret = sysdb_error_to_errno(lret);
             goto done;
         }
 
@@ -520,14 +588,14 @@ sysdb_gpo_store_cse(struct sss_domain_info *domain,
         lret = ldb_msg_add_empty(update_msg, SYSDB_CSE_TIMEOUT_ATTR,
                                  LDB_FLAG_MOD_ADD, NULL);
         if (lret != LDB_SUCCESS) {
-            ret = sss_ldb_error_to_errno(lret);
+            ret = sysdb_error_to_errno(lret);
             goto done;
         }
 
         lret = ldb_msg_add_fmt(update_msg, SYSDB_CSE_TIMEOUT_ATTR, "%lu",
                                ((cache_timeout) ? (now + cache_timeout) : 0));
         if (lret != LDB_SUCCESS) {
-            ret = sss_ldb_error_to_errno(lret);
+            ret = sysdb_error_to_errno(lret);
             goto done;
         }
 
@@ -536,7 +604,7 @@ sysdb_gpo_store_cse(struct sss_domain_info *domain,
             DEBUG(SSSDBG_MINOR_FAILURE,
                   "Failed to add CSE: [%s]\n",
                    ldb_strerror(lret));
-            ret = sss_ldb_error_to_errno(lret);
+            ret = sysdb_error_to_errno(lret);
             goto done;
         }
     } else if (ret == EOK && count == 1) {
@@ -550,14 +618,14 @@ sysdb_gpo_store_cse(struct sss_domain_info *domain,
                                  LDB_FLAG_MOD_REPLACE,
                                  NULL);
         if (lret != LDB_SUCCESS) {
-            ret = sss_ldb_error_to_errno(lret);
+            ret = sysdb_error_to_errno(lret);
             goto done;
         }
 
         lret = ldb_msg_add_fmt(update_msg, SYSDB_CSE_VERSION_ATTR,
                                "%d", cse_version);
         if (lret != LDB_SUCCESS) {
-            ret = sss_ldb_error_to_errno(lret);
+            ret = sysdb_error_to_errno(lret);
             goto done;
         }
 
@@ -565,14 +633,14 @@ sysdb_gpo_store_cse(struct sss_domain_info *domain,
         lret = ldb_msg_add_empty(update_msg, SYSDB_CSE_TIMEOUT_ATTR,
                                  LDB_FLAG_MOD_REPLACE, NULL);
         if (lret != LDB_SUCCESS) {
-            ret = sss_ldb_error_to_errno(lret);
+            ret = sysdb_error_to_errno(lret);
             goto done;
         }
 
         lret = ldb_msg_add_fmt(update_msg, SYSDB_CSE_TIMEOUT_ATTR, "%lu",
                                ((cache_timeout) ? (now + cache_timeout) : 0));
         if (lret != LDB_SUCCESS) {
-            ret = sss_ldb_error_to_errno(lret);
+            ret = sysdb_error_to_errno(lret);
             goto done;
         }
 
@@ -581,7 +649,7 @@ sysdb_gpo_store_cse(struct sss_domain_info *domain,
             DEBUG(SSSDBG_MINOR_FAILURE,
                   "Failed to modify CSE: [%s](%d)[%s]\n",
                   ldb_strerror(lret), lret, ldb_errstring(domain->sysdb->ldb));
-            ret = sss_ldb_error_to_errno(lret);
+            ret = sysdb_error_to_errno(lret);
             goto done;
         }
     } else {
@@ -604,6 +672,115 @@ done:
             DEBUG(SSSDBG_CRIT_FAILURE, "Could not cancel transaction\n");
         }
     }
+    talloc_free(tmp_ctx);
+    return ret;
+}
+
+errno_t
+sysdb_gpo_delete_cse(struct sss_domain_info *domain,
+                     const char *cse_guid)
+{
+    TALLOC_CTX *tmp_ctx;
+    errno_t ret, sret;
+    int lret;
+    struct ldb_result *res;
+    struct ldb_message **msgs;
+    size_t count;
+    struct ldb_message **gpo_msgs;
+    size_t gpo_count;
+    struct ldb_message_element *el;
+    const char *attrs[] = {NULL};
+    const char *gpo_attrs[] = {SYSDB_GPO_GUID_ATTR, NULL};
+    struct ldb_dn **gpo_dn_list;
+    const char *gpo_guid;
+    int i;
+
+    tmp_ctx = talloc_new(NULL);
+    if (!tmp_ctx) return ENOMEM;
+
+    sret = sysdb_gpo_cse_search(tmp_ctx,
+                                domain, cse_guid, attrs,
+                                &count,
+                                &msgs);
+    if (sret != EOK) {
+        if (sret == ENOENT) {
+            ret = EOK;
+        } else {
+            ret = sysdb_error_to_errno(sret);
+        }
+        goto done;
+    }
+    gpo_dn_list = talloc_array(tmp_ctx,
+                               struct ldb_dn *,
+                               count + 1);
+    if (gpo_dn_list == NULL) {
+        ret = ENOMEM;
+        goto done;
+    }
+    for (i = 0; i < count; i++) {
+        gpo_dn_list[i] = ldb_dn_get_parent(tmp_ctx, msgs[i]->dn);
+        sret = sysdb_delete_entry(domain->sysdb, msgs[i]->dn, false);
+        if (sret != EOK) {
+            ret = sysdb_error_to_errno(sret);
+            goto done;
+        }
+    }
+    for (i = 0; i < count; i++) {
+        /* Look for existing GPO entry in cache */
+        if (gpo_dn_list[i] == NULL) continue;
+        sret = sysdb_search_entry(tmp_ctx, domain->sysdb, gpo_dn_list[i],
+                                  LDB_SCOPE_BASE, NULL, gpo_attrs,
+                                  &gpo_count, &gpo_msgs);
+        if (sret == ENOENT) {
+            DEBUG(SSSDBG_OP_FAILURE,
+                  "No cache entry for GPO %s\n",
+                  ldb_dn_get_linearized(gpo_dn_list[i]));
+            ret = sysdb_error_to_errno(sret);
+            goto done;
+        }
+        if (sret == EOK && gpo_count == 1) {
+            el = ldb_msg_find_element(gpo_msgs[0], SYSDB_GPO_GUID_ATTR);
+            if (el != NULL) {
+                gpo_guid = ldb_msg_find_attr_as_string(gpo_msgs[0],
+                                                       SYSDB_GPO_GUID_ATTR,
+                                                       NULL);
+            }
+            if (el == NULL || gpo_guid == NULL) {
+                DEBUG(SSSDBG_OP_FAILURE,
+                      "Missing %s attribute for GPO %s\n",
+                      SYSDB_GPO_GUID_ATTR, ldb_dn_get_linearized(gpo_dn_list[i]));
+                ret = EINVAL;
+                goto done;
+            }
+        } else {
+            ret = EINVAL;
+            goto done;
+        }
+        sret = sysdb_gpo_get_cses(tmp_ctx,
+                                  domain,
+                                  gpo_guid,
+                                  attrs,
+                                  &res);
+        if (sret == EOK) {
+            // GPO has further CSEs; leave it in cache
+            continue;
+        }
+        else if (sret != ENOENT) {
+            ret = sysdb_error_to_errno(sret);
+            goto done;
+        }
+        sret = sysdb_delete_entry(domain->sysdb, gpo_dn_list[i], false);
+        if (sret != EOK) {
+            ret = sysdb_error_to_errno(sret);
+            goto done;
+        }
+        DEBUG(SSSDBG_TRACE_FUNC,
+              "Removed empty GPO [gpo_guid:%s] from cache\n",
+              gpo_guid);
+    }
+    ret = EOK;
+
+done:
     talloc_free(tmp_ctx);
     return ret;
 }
@@ -699,13 +876,9 @@ sysdb_gpo_get_cses(TALLOC_CTX *mem_ctx,
     lret = ldb_search(domain->sysdb->ldb, tmp_ctx, &res, base_dn,
                       LDB_SCOPE_SUBTREE, attrs, SYSDB_CSE_FILTER);
     if (lret) {
-        DEBUG(SSSDBG_MINOR_FAILURE,
-              "Could not locate CSEs: [%s]\n",
-              ldb_strerror(lret));
         ret = sss_ldb_error_to_errno(lret);
         goto done;
     }
-
     if (res->count == 0) {
         ret = ENOENT;
         goto done;
@@ -717,7 +890,7 @@ sysdb_gpo_get_cses(TALLOC_CTX *mem_ctx,
 done:
 
     if (ret == ENOENT) {
-        DEBUG(SSSDBG_TRACE_ALL, "No CSE entries.\n");
+        DEBUG(SSSDBG_TRACE_ALL, "No CSE entries in cache.\n");
     } else if (ret) {
         DEBUG(SSSDBG_OP_FAILURE, "Error: %d (%s)\n", ret, strerror(ret));
     }

@@ -27,6 +27,27 @@
 #include "db/sysdb_private.h"
 #include "db/sysdb_computer.h"
 
+static struct ldb_dn *
+sysdb_computer_dn(TALLOC_CTX *mem_ctx,
+                  struct sss_domain_info *domain,
+                  const char *name)
+{
+    errno_t ret;
+    char *clean_name;
+    struct ldb_dn *dn;
+
+    ret = sysdb_dn_sanitize(NULL, name, &clean_name);
+    if (ret != EOK) {
+        return NULL;
+    }
+
+    dn = ldb_dn_new_fmt(mem_ctx, domain->sysdb->ldb, SYSDB_TMPL_COMPUTER,
+                        clean_name, domain->name);
+    talloc_free(clean_name);
+
+    return dn;
+}
+
 static errno_t
 sysdb_search_computer_by_name(TALLOC_CTX *mem_ctx,
                               struct sss_domain_info *domain,
@@ -197,5 +218,118 @@ done:
     }
     talloc_zfree(tmp_ctx);
 
+    return ret;
+}
+
+errno_t
+sysdb_computer_setgplinks(TALLOC_CTX *mem_ctx,
+                          struct sss_domain_info *domain,
+                          const char *computer_name,
+                          const char **cached_gpo_dn_list,
+                          int num_cached_gpo_dns)
+{
+    TALLOC_CTX *tmp_ctx;
+    bool in_transaction = false;
+    struct ldb_message *update_msg;
+    struct ldb_message **msgs;
+    struct ldb_message_element *el;
+    size_t count;
+    errno_t ret, sret;
+    int lret, i;
+
+    static const char *attrs[] = {SYSDB_GPLINK_STR, NULL};
+
+    tmp_ctx = talloc_new(NULL);
+    if (!tmp_ctx) {
+        return ENOMEM;
+    }
+
+    update_msg = ldb_msg_new(tmp_ctx);
+    if (!update_msg) {
+        ret = ENOMEM;
+        goto done;
+    }
+    update_msg->dn = sysdb_computer_dn(update_msg, domain, computer_name);
+    if (!update_msg->dn) {
+        ret = ENOMEM;
+        goto done;
+    }
+
+    /* Look for existing computer entry in cache */
+    ret = sysdb_search_entry(tmp_ctx, domain->sysdb, update_msg->dn,
+                             LDB_SCOPE_BASE, NULL, attrs, &count, &msgs);
+    if (ret == ENOENT) {
+        DEBUG(SSSDBG_OP_FAILURE,
+              "No cache entry for host %s\n",
+              ldb_dn_get_linearized(update_msg->dn));
+        goto done;
+    }
+    if (ret == EOK && count == 1) {
+        el = ldb_msg_find_element(msgs[0], SYSDB_GPLINK_STR);
+        if (el == NULL && num_cached_gpo_dns == 0) {
+            goto done;
+        }
+        ret = sysdb_transaction_start(domain->sysdb);
+        if (ret != EOK) {
+            DEBUG(SSSDBG_CRIT_FAILURE, "Failed to start transaction\n");
+            goto done;
+        }
+        in_transaction = true;
+        if (el != NULL) {
+            lret = ldb_msg_add_empty(update_msg, SYSDB_GPLINK_STR,
+                                     LDB_FLAG_MOD_DELETE, NULL);
+            if (lret != LDB_SUCCESS) {
+                ret = sysdb_error_to_errno(lret);
+                goto done;
+            }
+        }
+        if (num_cached_gpo_dns > 0) {
+            lret = ldb_msg_add_empty(update_msg, SYSDB_GPLINK_STR,
+                                     LDB_FLAG_MOD_ADD,
+                                     NULL);
+            if (lret != LDB_SUCCESS) {
+                ret = sysdb_error_to_errno(lret);
+                goto done;
+            }
+            for (i = 0; i < num_cached_gpo_dns; i++) {
+                lret = ldb_msg_add_string(update_msg, SYSDB_GPLINK_STR,
+                                          cached_gpo_dn_list[i]);
+                if (lret != LDB_SUCCESS) {
+                    ret = sysdb_error_to_errno(lret);
+                    goto done;
+                }
+            }
+        }
+        lret = ldb_modify(domain->sysdb->ldb, update_msg);
+        if (lret != LDB_SUCCESS) {
+            DEBUG(SSSDBG_MINOR_FAILURE,
+                  "Failed to set gplinks: [%s](%d)[%s]\n",
+                  ldb_strerror(lret), lret, ldb_errstring(domain->sysdb->ldb));
+            ret = sysdb_error_to_errno(lret);
+            goto done;
+        }
+       ret = sysdb_transaction_commit(domain->sysdb);
+        if (ret != EOK) {
+            DEBUG(SSSDBG_CRIT_FAILURE,
+                  "Could not commit transaction: [%s]\n", strerror(ret));
+            goto done;
+        }
+        in_transaction = false;
+    } else {
+        ret = EINVAL;
+        goto done;
+    }
+
+done:
+    if (in_transaction) {
+        sret = sysdb_transaction_cancel(domain->sysdb);
+        if (sret != EOK) {
+            DEBUG(SSSDBG_CRIT_FAILURE, "Could not cancel transaction\n");
+        }
+    }
+    if (ret) {
+        DEBUG(SSSDBG_MINOR_FAILURE, "Error: %d (%s)\n", ret, strerror(ret));
+    }
+    talloc_zfree(tmp_ctx);
     return ret;
 }

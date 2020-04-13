@@ -3235,6 +3235,18 @@ ad_gpo_access_core_protocol_done(struct tevent_req *subreq)
     DEBUG(SSSDBG_TRACE_ALL,
           "Core group policy application successfully completed\n");
 
+    ret = sysdb_gpo_delete_cse(state->host_domain,
+                               state->cse_guid);
+    if (ret != EOK) {
+        goto done;
+    }
+    /* FIXME As a future improvement we have to extend GPO cache management.
+     * sysdb_gpo_delete_cse() is the first simple approach to remove obsolte
+     * GPOs and their child CSEs from SSSD cache. Still we have the related
+     * policy files in SSSD file cache and parent GPOs with other CSEs.
+     * task for expired entries is started instead.
+     */
+
     subreq = ad_gpo_cse_security_send(state,
                                       state->ev,
                                       state->policy_mode,
@@ -6268,6 +6280,7 @@ ad_gpo_get_gpt_file_done(struct tevent_req *subreq)
     if (filtered_gpo->send_to_child) {
         ret = sysdb_gpo_store_gpo(state->policy_target_domain,
                                   gpo_guid,
+                                  filtered_gpo->gpo_dn,
                                   filtered_gpo->gpo_container_version,
                                   sysvol_gpt_version,
                                   state->gpo_timeout_option, now);
