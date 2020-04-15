@@ -231,7 +231,10 @@ ad_gpo_cse_security_send(TALLOC_CTX *mem_ctx,
                          const char *cse_guid,
                          struct gp_gpo **filtered_gpos,
                          int num_filtered_gpos);
-int ad_gpo_cse_security_recv(struct tevent_req *req);
+int ad_gpo_cse_security_recv(struct tevent_req *req,
+                             TALLOC_CTX *mem_ctx,
+                             const char ***_cached_cse_dn_list,
+                             int *_num_cached_cse_dns);
 
 struct tevent_req *ad_gpo_core_send(TALLOC_CTX *mem_ctx,
                                     struct tevent_context *ev,
@@ -828,6 +831,12 @@ ad_gpo_get_sids(TALLOC_CTX *mem_ctx,
     }
 
     user_sid = ldb_msg_find_attr_as_string(res->msgs[0], SYSDB_SID_STR, NULL);
+    if (user_sid == NULL) {
+        DEBUG(SSSDBG_CRIT_FAILURE, "Missing SID for cache entry [%s].\n",
+              ldb_dn_get_linearized(res->msgs[0]->dn));
+        ret = EINVAL;
+        goto done;
+    }
     num_group_sids = (res->count) - 1;
 
     /* include space for AD_AUTHENTICATED_USERS_SID and NULL */
@@ -2010,6 +2019,93 @@ ad_gpo_perform_hbac_processing(TALLOC_CTX *mem_ctx,
     return ret;
 }
 
+static errno_t
+ad_gpo_cache_refresh_status(TALLOC_CTX *mem_ctx,
+                            struct sss_domain_info *domain,
+                            const char **_gp_links,
+                            int _num_gp_links)
+{
+    TALLOC_CTX *tmp_ctx;
+    struct ldb_message **results;
+    size_t num_results;
+    const char **cse_dn_list;
+    time_t *policy_file_timeout_list = NULL;
+    int checked_gp_links = 0;
+    errno_t ret;
+    int i, k;
+
+    const char *cse_attrs[] = {SYSDB_CSE_TIMEOUT_ATTR, NULL};
+
+    tmp_ctx = talloc_new(NULL);
+    if (!tmp_ctx) {
+        return ENOMEM;
+    }
+
+    ret = sysdb_gpo_cse_search(tmp_ctx, domain,
+                               GP_EXT_GUID_SECURITY, cse_attrs,
+                               &num_results,
+                               &results);
+    if (ret != EOK) {
+        if (ret == ENOENT && _num_gp_links == 0) {
+            ret = EOK;
+        }
+        goto done;
+    }
+    cse_dn_list = talloc_array(tmp_ctx,
+                               const char *,
+                               num_results + 1);
+    if (cse_dn_list == NULL) {
+        ret = ENOMEM;
+        goto done;
+    }
+    policy_file_timeout_list = talloc_array(tmp_ctx,
+                                            time_t,
+                                            num_results + 1);
+    if (policy_file_timeout_list == NULL) {
+        ret = ENOMEM;
+        goto done;
+    }
+    for (i = 0; i < num_results; i++) {
+        /* ldb_search does not return CES DN as attribute;
+         * retrieve it from the result */
+        cse_dn_list[i] = ldb_dn_get_linearized(results[i]->dn);
+        if (cse_dn_list[i] == NULL) {
+            DEBUG(SSSDBG_CRIT_FAILURE,
+                  "CSE DN is missing from result\n");
+            ret = EINVAL;
+            goto done;
+        }
+        policy_file_timeout_list[i] =
+                ldb_msg_find_attr_as_uint64(results[i],
+                                            SYSDB_CSE_TIMEOUT_ATTR, 0);
+    }
+    for (i = 0; i < _num_gp_links; i++) {
+        if (checked_gp_links < i) {
+            ret = ENOENT;
+            goto done;
+        }
+        for (k = 0; k < num_results; k++) {
+            if (cse_dn_list[k] == NULL) continue;
+            if (strcmp(_gp_links[i], cse_dn_list[k]) == 0) {
+                if (policy_file_timeout_list[k] < time(NULL)) {
+                    ret = EINVAL;
+                    goto done;
+                }
+                cse_dn_list[k] = NULL;
+                checked_gp_links++;
+                break;
+            }
+        }
+    }
+    if (checked_gp_links < _num_gp_links) {
+        ret = ENOENT;
+    }
+
+done:
+    talloc_free(tmp_ctx);
+    return ret;
+}
+
 /* == ad_gpo_access_send/recv implementation ================================*/
 
 struct ad_gpo_access_state {
@@ -2024,6 +2120,7 @@ struct ad_gpo_access_state {
     struct sss_domain_info *user_domain;
     struct sss_domain_info *host_domain;
     const char *user;
+    const char *hostname;
     const char *cse_guid;
     struct gp_gpo **security_cse_gpos;
     int num_security_cse_gpos;
@@ -2051,16 +2148,24 @@ ad_gpo_access_send(TALLOC_CTX *mem_ctx,
                    const char *user,
                    const char *service)
 {
+    TALLOC_CTX *tmp_ctx = NULL;
     struct tevent_req *req;
     struct tevent_req *subreq;
     struct ad_gpo_access_state *state;
     errno_t ret;
-    int hret;
+    int hret, lret;
     hash_key_t key;
     hash_value_t val;
     enum gpo_map_type gpo_map_type;
-    const char *sam_account_name;
+    struct ldb_message *msg;
+    struct ldb_message_element *el;
+    const char *host_dn = NULL;
+    const char **gp_links = NULL;
+    int num_gp_links = 0;
+    int i;
 
+    const char *host_attrs[] = {SYSDB_ORIG_DN, SYSDB_GPLINK_STR,
+                                NULL};
     /* setup logging for gpo child */
     gpo_child_init();
 
@@ -2147,13 +2252,86 @@ ad_gpo_access_send(TALLOC_CTX *mem_ctx,
 
     /* SDAP_SASL_AUTHID contains the name used for kinit and SASL bind which
      * in the AD case is the NetBIOS name. */
-    sam_account_name = dp_opt_get_string(state->opts->basic, SDAP_SASL_AUTHID);
-    if (sam_account_name == NULL) {
+    state->hostname = dp_opt_get_string(state->opts->basic, SDAP_SASL_AUTHID);
+    if (state->hostname == NULL) {
         ret = ENOMEM;
         goto immediately;
     }
     DEBUG(SSSDBG_TRACE_FUNC,
-          "policy target SAM account name is %s\n", sam_account_name);
+          "Policy target SAM account name is %s\n", state->hostname);
+
+    tmp_ctx = talloc_new(NULL);
+    if (tmp_ctx == NULL) {
+        ret = ENOMEM;
+        goto immediately;
+    }
+    lret = sysdb_get_computer(tmp_ctx,
+                              state->host_domain,
+                              state->hostname,
+                              host_attrs, &msg);
+    if (lret != EOK && lret != ENOENT) {
+        DEBUG(SSSDBG_OP_FAILURE,
+              "sysdb_get_computer failed: [%d](%s)\n",
+              lret, sss_strerror(lret));
+        ret = lret;
+        goto immediately;
+    }
+    if (lret == EOK) {
+        el = ldb_msg_find_element(msg, SYSDB_GPLINK_STR);
+        if (el != NULL && el->num_values > 0) {
+            num_gp_links = el->num_values;
+            gp_links = talloc_array(tmp_ctx,
+                                    const char *,
+                                    num_gp_links + 1);
+            if (gp_links == NULL) {
+                ret = ENOMEM;
+                goto immediately;
+            }
+            for (i = 0; i < num_gp_links; i++) {
+                gp_links[i] = talloc_steal(tmp_ctx,
+                                           (char *)el->values[i].data);
+                if (gp_links[i] == NULL) {
+                    ret = ENOMEM;
+                    goto immediately;
+                }
+            }
+            ret = ad_gpo_cache_refresh_status(tmp_ctx,
+                                              state->host_domain,
+                                              gp_links,
+                                              num_gp_links);
+            if (ret == ENOMEM) {
+                goto immediately;
+            }
+            lret = ret;
+        }
+    }
+    if (lret == EOK) {
+        host_dn = ldb_msg_find_attr_as_string(msg, SYSDB_ORIG_DN, NULL);
+        DEBUG(SSSDBG_TRACE_ALL,
+              "Policy target DN: %s\n",
+              host_dn);
+        DEBUG(SSSDBG_FUNC_DATA,
+              "Using cached policy application data for access control:\n");
+        for (i = 0; i < num_gp_links; i++) {
+            DEBUG(SSSDBG_TRACE_ALL, "security cse gPLink[%d] is %s\n",
+                                      i, gp_links[i]);
+        }
+
+        ret = ad_gpo_perform_hbac_processing(state,
+                                             state->cse_guid,
+                                             state->gpo_mode,
+                                             state->gpo_map_type,
+                                             state->user,
+                                             state->user_domain,
+                                             state->host_domain);
+        if (ret == EOK) {
+            goto immediately;
+        }
+    } else {
+        DEBUG(SSSDBG_FUNC_DATA,
+                "Policy application data for %s not in cache or expired\n",
+                state->hostname);
+    }
 
     subreq = ad_gpo_core_send(state,
                               state->ev,
@@ -2161,7 +2339,7 @@ ad_gpo_access_send(TALLOC_CTX *mem_ctx,
                               state->access_ctx->ad_options,
                               state->access_ctx->ad_id_ctx,
                               state->opts,
-                              sam_account_name,
+                              state->hostname,
                               state->policy_mode,
                               state->cse_guid);
     if (subreq == NULL) {
@@ -2170,10 +2348,15 @@ ad_gpo_access_send(TALLOC_CTX *mem_ctx,
     }
     tevent_req_set_callback(subreq, ad_gpo_access_core_protocol_done, req);
 
+    if (tmp_ctx != NULL) {
+        talloc_free(tmp_ctx);
+    }
     return req;
 
 immediately:
-
+    if (tmp_ctx != NULL) {
+        talloc_free(tmp_ctx);
+    }
     if (ret == EOK) {
         tevent_req_done(req);
     } else {
@@ -2275,18 +2458,15 @@ ad_gpo_connect_done(struct tevent_req *subreq)
 
     if (state->policy_mode == AD_GP_MODE_COMPUTER) {
         /* Get the cached computer object by computer name */
-        static const char *host_attrs[] = {SYSDB_ORIG_DN, SYSDB_SID_STR,
-                                           SYSDB_MEMBEROF_SID_STR,
-                                           NULL};
+        const char *host_attrs[] = {SYSDB_ORIG_DN, SYSDB_SID_STR,
+                                    SYSDB_MEMBEROF_SID_STR,
+                                    NULL};
         struct ldb_message *msg;
         struct ldb_message_element *host_memberOf;
         const char *host_dn = NULL;
         const char *host_sid = NULL;
         int lret;
 
-        DEBUG(SSSDBG_TRACE_FUNC,
-                "Retrieving policy target attributes from cache [%s]\n",
-                state->policy_target_name);
         tmp_ctx = talloc_new(NULL);
         if (tmp_ctx == NULL) {
             ret = ENOMEM;
@@ -2361,6 +2541,11 @@ ad_gpo_connect_done(struct tevent_req *subreq)
                     goto done;
                 }
             }
+
+            DEBUG(SSSDBG_FUNC_DATA,
+                    "Using policy target attributes from cache [%s]\n",
+                    state->policy_target_name);
+
             subreq = ad_gpo_process_som_send(state,
                                              state->ev,
                                              state->conn,
@@ -2379,7 +2564,9 @@ ad_gpo_connect_done(struct tevent_req *subreq)
             ret = EOK;
             goto done;
         } else {
-            DEBUG(SSSDBG_TRACE_FUNC, "ENOENT\n");
+            DEBUG(SSSDBG_FUNC_DATA,
+                    "Policy target attributes [%s] not in cache\n",
+                    state->policy_target_name);
         }
     }
 
@@ -2698,19 +2885,49 @@ ad_gpo_filtering_done(struct tevent_req *subreq)
 static void
 ad_gpo_cse_security_done(struct tevent_req *subreq)
 {
+    TALLOC_CTX *tmp_ctx = NULL;
     struct tevent_req *req;
     struct ad_gpo_access_state *state;
+    const char **gPLink_list;
+    int num_gPLinks;
     int ret;
+    errno_t lret;
 
     req = tevent_req_callback_data(subreq, struct tevent_req);
     state = tevent_req_data(req, struct ad_gpo_access_state);
 
-    ret = ad_gpo_cse_security_recv(subreq);
+    tmp_ctx = talloc_new(NULL);
+    if (tmp_ctx == NULL) {
+        ret = ENOMEM;
+        goto done;
+    }
 
+    ret = ad_gpo_cse_security_recv(subreq,
+                                   tmp_ctx,
+                                   &gPLink_list,
+                                   &num_gPLinks);
     talloc_zfree(subreq);
 
     if (ret == EOK) {
         /* ret is EOK only after all GPO policy files have been downloaded */
+        lret = sysdb_computer_setgplinks(tmp_ctx,
+                                         state->host_domain,
+                                         state->hostname,
+                                         gPLink_list,
+                                         num_gPLinks);
+        if (lret != EOK) {
+            DEBUG(SSSDBG_TRACE_FUNC,
+                  "Could not store security CSE gplinks for %s: [%d](%s}\n",
+                  state->hostname, lret, sss_strerror(lret));
+            if (lret == ENOMEM) {
+                ret = lret;
+                goto done;
+            }
+        } else {
+            DEBUG(SSSDBG_FUNC_DATA,
+                  "Policy application data for %s stored in cache\n",
+                  state->hostname);
+        }
         ret = ad_gpo_perform_hbac_processing(state,
                                              state->cse_guid,
                                              state->gpo_mode,
@@ -2723,11 +2940,12 @@ ad_gpo_cse_security_done(struct tevent_req *subreq)
                   ret, sss_strerror(ret));
             goto done;
         }
-
     }
 
  done:
-
+    if (tmp_ctx != NULL) {
+        talloc_free(tmp_ctx);
+    }
     if (ret == EOK) {
         tevent_req_done(req);
     } else {
@@ -2756,6 +2974,8 @@ struct ad_gpo_cse_security_state {
     struct gp_gpo **security_cse_gpos;
     int num_security_cse_gpos;
     int gpo_index;
+    const char **cached_cse_dn_list;
+    int num_cached_cse_dn;
 };
 
 static errno_t ad_gpo_cse_security_step(struct tevent_req *req);
@@ -2797,6 +3017,8 @@ ad_gpo_cse_security_send(TALLOC_CTX *mem_ctx,
     state->security_cse_gpos = talloc_steal(state, security_cse_gpos);
     state->num_security_cse_gpos = num_security_cse_gpos;
     state->gpo_index = 0;
+    state->cached_cse_dn_list = NULL;
+    state->num_cached_cse_dn = 0;
 
     /*
     * before we start processing each gpo, we delete the GP Result object
@@ -2961,11 +3183,15 @@ ad_gpo_cse_security_step(struct tevent_req *req)
 static void
 ad_gpo_get_cse_security_file_done(struct tevent_req *subreq)
 {
+    TALLOC_CTX *tmp_ctx;
     struct tevent_req *req;
     struct ad_gpo_cse_security_state *state;
+    const char *attrs[] = {NULL};
+    const char * cse_dn = NULL;
     int cse_version;
     time_t cse_policy_file_timeout;
     time_t now;
+    struct ldb_result *res;
     int ret;
 
     req = tevent_req_callback_data(subreq, struct tevent_req);
@@ -3036,11 +3262,60 @@ ad_gpo_get_cse_security_file_done(struct tevent_req *subreq)
         goto done;
     }
 
+    tmp_ctx = talloc_new(NULL);
+    if (!tmp_ctx) {
+        ret = ENOMEM;
+        goto done;
+    }
+    ret = sysdb_gpo_get_cse_by_guid(tmp_ctx,
+                                    state->host_domain,
+                                    gpo_guid,
+                                    state->cse_guid,
+                                    attrs,
+                                    &res);
+    if (ret != EOK) {
+        DEBUG(SSSDBG_OP_FAILURE,
+              "No access to security CSE of GPO %s in cache: [%d](%s)\n",
+              gpo_guid, ret, sss_strerror(ret));
+        goto done;
+    }
+    /* ldb_search does not return CES DN as attribute;
+     * retrieve it from the result */
+    cse_dn = ldb_dn_get_linearized(res->msgs[0]->dn);
+    if (cse_dn == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE,
+              "Access to DN of security CSE of GPO %s failed\n",
+              gpo_guid);
+        ret = EINVAL;
+        goto done;
+    }
+    if (state->cached_cse_dn_list == NULL) {
+        state->cached_cse_dn_list = talloc_array(state,
+                                                 const char *,
+                                                 state->num_security_cse_gpos + 1);
+        if (state->cached_cse_dn_list == NULL) {
+            ret = ENOMEM;
+            goto done;
+        }
+        state->num_cached_cse_dn = 0;
+    }
+    state->cached_cse_dn_list[state->num_cached_cse_dn] =
+            talloc_steal(state, cse_dn);
+    if (state->cached_cse_dn_list[state->num_cached_cse_dn] == NULL) {
+        ret = ENOMEM;
+        goto done;
+    }
+    DEBUG(SSSDBG_TRACE_ALL, "gplink[%d] for host is: (%s)\n",
+          state->num_cached_cse_dn, cse_dn);
+    state->num_cached_cse_dn++;
+
     state->gpo_index++;
     ret = ad_gpo_cse_security_step(req);
 
  done:
-
+    if (tmp_ctx != NULL) {
+        talloc_free(tmp_ctx);
+    }
     if (ret == EOK) {
         tevent_req_done(req);
     } else if (ret != EAGAIN) {
@@ -3048,10 +3323,18 @@ ad_gpo_get_cse_security_file_done(struct tevent_req *subreq)
     }
 }
 
-int ad_gpo_cse_security_recv(struct tevent_req *req)
+int ad_gpo_cse_security_recv(struct tevent_req *req,
+                             TALLOC_CTX *mem_ctx,
+                             const char ***_cached_cse_dn_list,
+                             int *_num_cached_cse_dns)
 {
+    struct ad_gpo_cse_security_state *state =
+        tevent_req_data(req, struct ad_gpo_cse_security_state);
+
     TEVENT_REQ_RETURN_ON_ERROR(req);
 
+    *_cached_cse_dn_list = talloc_steal(mem_ctx, state->cached_cse_dn_list);
+    *_num_cached_cse_dns = state->num_cached_cse_dn;
     return EOK;
 }
 
@@ -4108,6 +4391,10 @@ ad_gpo_get_target_sids_done(struct tevent_req *subreq)
                 if (lret == ENOMEM) {
                     ret = lret;
                 }
+            } else {
+                DEBUG(SSSDBG_FUNC_DATA,
+                      "Policy target attributes stored in cache [%s]\n",
+                      state->target_dn);
             }
         }
     }
