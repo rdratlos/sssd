@@ -4679,6 +4679,7 @@ ad_gpo_populate_candidate_gpos(TALLOC_CTX *mem_ctx,
     int num_candidate_gpos = 0;
     const char **enforced_gpo_dns = NULL;
     const char **unenforced_gpo_dns = NULL;
+    int som_count = 0;
     int gpo_dn_idx = 0;
     int num_enforced = 0;
     int enforced_idx = 0;
@@ -4713,6 +4714,7 @@ ad_gpo_populate_candidate_gpos(TALLOC_CTX *mem_ctx,
         }
         i++;
     }
+    som_count = i;
 
     num_candidate_gpos = num_enforced + num_unenforced;
 
@@ -4735,8 +4737,7 @@ ad_gpo_populate_candidate_gpos(TALLOC_CTX *mem_ctx,
         goto done;
     }
 
-    i = 0;
-    while (som_list[i]) {
+    for (i = som_count - 1; i >= 0; i--) {
         gp_som = som_list[i];
         j = 0;
         while (gp_som && gp_som->gplink_list && gp_som->gplink_list[j]) {
@@ -4746,17 +4747,7 @@ ad_gpo_populate_candidate_gpos(TALLOC_CTX *mem_ctx,
                 ret = EINVAL;
                 goto done;
             }
-
-            if (gp_gplink->enforced) {
-                enforced_gpo_dns[enforced_idx] =
-                    talloc_steal(enforced_gpo_dns, gp_gplink->gpo_dn);
-                if (enforced_gpo_dns[enforced_idx] == NULL) {
-                    ret = ENOMEM;
-                    goto done;
-                }
-                enforced_idx++;
-            } else {
-
+            if (!gp_gplink->enforced) {
                 unenforced_gpo_dns[unenforced_idx] =
                     talloc_steal(unenforced_gpo_dns, gp_gplink->gpo_dn);
 
@@ -4768,10 +4759,34 @@ ad_gpo_populate_candidate_gpos(TALLOC_CTX *mem_ctx,
             }
             j++;
         }
+    }
+    unenforced_gpo_dns[num_unenforced] = NULL;
+
+    /* Precedence of enforced GPOs is a reversal of the usual rule,
+     * in which the setting from the hierarchy level (SOM) nearest
+     * from the client would prevail. The settings enforced furthest
+     * from the client prevail.
+     */
+    i = 0;
+    while (som_list[i]) {
+        gp_som = som_list[i];
+        j = 0;
+        while (gp_som && gp_som->gplink_list && gp_som->gplink_list[j]) {
+            gp_gplink = gp_som->gplink_list[j];
+            if (gp_gplink != NULL && gp_gplink->enforced) {
+                enforced_gpo_dns[enforced_idx] =
+                    talloc_steal(enforced_gpo_dns, gp_gplink->gpo_dn);
+                if (enforced_gpo_dns[enforced_idx] == NULL) {
+                    ret = ENOMEM;
+                    goto done;
+                }
+                enforced_idx++;
+            }
+            j++;
+        }
         i++;
     }
     enforced_gpo_dns[num_enforced] = NULL;
-    unenforced_gpo_dns[num_unenforced] = NULL;
 
     candidate_gpos = talloc_array(tmp_ctx,
                                   struct gp_gpo *,
@@ -4783,7 +4798,7 @@ ad_gpo_populate_candidate_gpos(TALLOC_CTX *mem_ctx,
     }
 
     gpo_dn_idx = 0;
-    for (i = num_unenforced - 1; i >= 0; i--) {
+    for (i = 0; i < num_unenforced; i++) {
         candidate_gpos[gpo_dn_idx] = talloc_zero(candidate_gpos, struct gp_gpo);
         if (candidate_gpos[gpo_dn_idx] == NULL) {
             ret = ENOMEM;
