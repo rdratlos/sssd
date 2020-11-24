@@ -263,6 +263,7 @@ ad_gpo_process_target_send(TALLOC_CTX *mem_ctx,
                            struct sdap_id_op *sdap_op,
                            struct sdap_options *opts,
                            int timeout,
+                           const char * ad_domain,
                            const char *target_name,
                            struct sss_domain_info *target_domain,
                            enum ad_gp_application_modes policy_mode);
@@ -2187,6 +2188,7 @@ struct ad_gpo_access_state {
     enum gpo_map_type gpo_map_type;
     struct sss_domain_info *user_domain;
     struct sss_domain_info *host_domain;
+    const char *ad_domain;
     const char *user;
     const char *hostname;
     const char *cse_guid;
@@ -2301,7 +2303,8 @@ ad_gpo_access_send(TALLOC_CTX *mem_ctx,
      */
     state->user_domain = domain;
     state->host_domain = get_domains_head(domain);
-
+    state->ad_domain = dp_opt_get_string(ctx->ad_id_ctx->ad_options->basic,
+                                         AD_DOMAIN);
     state->policy_mode = AD_GP_MODE_COMPUTER;
     state->gpo_map_type = gpo_map_type;
     state->cse_guid = GP_EXT_GUID_SECURITY;
@@ -2325,6 +2328,12 @@ ad_gpo_access_send(TALLOC_CTX *mem_ctx,
     }
     DEBUG(SSSDBG_TRACE_FUNC,
           "Policy target SAM account name is %s\n", state->hostname);
+    DEBUG(SSSDBG_TRACE_FUNC,
+          "User domain is %s\n", state->user_domain->flat_name);
+    DEBUG(SSSDBG_TRACE_FUNC,
+          "Host domain is %s\n", state->host_domain->flat_name);
+    DEBUG(SSSDBG_TRACE_FUNC,
+          "AD domain is %s\n", state->ad_domain);
 
     tmp_ctx = talloc_new(NULL);
     if (tmp_ctx == NULL) {
@@ -2484,6 +2493,7 @@ ad_gpo_connect_done(struct tevent_req *subreq)
     char *server_uri;
     LDAPURLDesc *lud;
     time_t expiration_time;
+    const char *ad_domain;
     int i;
 
     req = tevent_req_callback_data(subreq, struct tevent_req);
@@ -2506,6 +2516,8 @@ ad_gpo_connect_done(struct tevent_req *subreq)
         }
     }
 
+    ad_domain = dp_opt_get_string(state->ad_id_ctx->ad_options->basic,
+                                  AD_DOMAIN);
     /* extract server_hostname from server_uri */
     server_uri = state->conn->service->uri;
     ret = ldap_url_parse(server_uri, &lud);
@@ -2641,7 +2653,7 @@ ad_gpo_connect_done(struct tevent_req *subreq)
                                              state->timeout,
                                              dp_opt_get_string(state->ad_options, AD_SITE),
                                              state->target->dn,
-                                             state->policy_target_domain->name);
+                                             ad_domain);
             if (subreq == NULL) {
                 ret = ENOMEM;
                 goto done;
@@ -2661,6 +2673,7 @@ ad_gpo_connect_done(struct tevent_req *subreq)
                                         state->sdap_op,
                                         state->opts,
                                         state->timeout,
+                                        ad_domain,
                                         state->policy_target_name,
                                         state->policy_target_domain,
                                         state->policy_mode);
@@ -2746,7 +2759,8 @@ ad_gpo_process_target_done(struct tevent_req *subreq)
                                      state->timeout,
                                      dp_opt_get_string(state->ad_options, AD_SITE),
                                      state->target->dn,
-                                     state->policy_target_domain->name);
+                                     dp_opt_get_string(state->ad_id_ctx->ad_options->basic,
+                                                       AD_DOMAIN));
     if (subreq == NULL) {
         ret = ENOMEM;
         goto done;
@@ -3918,6 +3932,7 @@ struct ad_gpo_process_target_state {
     struct sdap_id_op *sdap_op;
     struct sdap_options *opts;
     int timeout;
+    const char *ad_domain;
     enum target_object {
         AD_GP_TARGET_COMPUTER = 0,
         AD_GP_TARGET_USER
@@ -3946,6 +3961,7 @@ ad_gpo_process_target_send(TALLOC_CTX *mem_ctx,
                            struct sdap_id_op *sdap_op,
                            struct sdap_options *opts,
                            int timeout,
+                           const char *ad_domain,
                            const char *target_name,
                            struct sss_domain_info *target_domain,
                            enum ad_gp_application_modes policy_mode)
@@ -3971,6 +3987,7 @@ ad_gpo_process_target_send(TALLOC_CTX *mem_ctx,
     state->sdap_op = sdap_op;
     state->opts = opts;
     state->timeout = timeout;
+    state->ad_domain = ad_domain;
     state->group_index = 0;
     state->target_groups = NULL;
     state->num_target_groups = 0;
@@ -3996,11 +4013,11 @@ ad_gpo_process_target_send(TALLOC_CTX *mem_ctx,
     }
 
     /* Convert the domain name into domain DN */
-    ret = domain_to_basedn(state, state->target_domain->name, &domain_dn);
+    ret = domain_to_basedn(state, state->ad_domain, &domain_dn);
     if (ret != EOK) {
         DEBUG(SSSDBG_OP_FAILURE,
               "Cannot convert domain name [%s] to base DN [%d]: %s\n",
-               state->target_domain->name, ret, sss_strerror(ret));
+              state->ad_domain, ret, sss_strerror(ret));
         goto immediately;
     }
 
@@ -4315,11 +4332,11 @@ ad_gpo_get_target_sids_step(struct tevent_req *req)
     }
 
     /* Convert the domain name into domain DN */
-    ret = domain_to_basedn(state, state->target_domain->name, &domain_dn);
+    ret = domain_to_basedn(state, state->ad_domain, &domain_dn);
     if (ret != EOK) {
         DEBUG(SSSDBG_OP_FAILURE,
               "Cannot convert domain name [%s] to base DN [%d]: %s\n",
-               state->target_domain->name, ret, sss_strerror(ret));
+              state->ad_domain, ret, sss_strerror(ret));
         return ret;
     }
 
